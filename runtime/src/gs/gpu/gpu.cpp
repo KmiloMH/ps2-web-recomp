@@ -1422,6 +1422,25 @@ void draw(const State &st, const Vertex *v, int count) {
             return gx > 0.0f || (gx == 0.0f && gy > 0.0f);
         };
         rec[27] = (inclusive(x1, y1, x2, y2) ? 1u : 0u) | (inclusive(x2, y2, x0, y0) ? 2u : 0u) | (inclusive(x0, y0, x1, y1) ? 4u : 0u);
+        // Dense models leave many triangles that cover no sample at all; every one still costs
+        // a record, tile binning and a pass over its tiles. For small boxes, test the samples the
+        // shader would (same edge functions, with a margin that errs towards drawing) and drop
+        // the triangle when none is inside.
+        if ((maxx - minx + 1) * (maxy - miny + 1) <= 16) {
+            const float margin = -1e-3f * std::fabs(area);
+            bool covered = false;
+            for (int yy = miny; yy <= maxy && !covered; ++yy)
+                for (int xx = minx; xx <= maxx && !covered; ++xx)
+                    for (std::uint32_t k = 0; k < g_scale * g_scale && !covered; ++k) {
+                        const float px = static_cast<float>(xx) + static_cast<float>(k % g_scale) / samples;
+                        const float py = static_cast<float>(yy) + static_cast<float>(k / g_scale) / samples;
+                        const float e0 = ((x1 - px) * (y2 - py) - (x2 - px) * (y1 - py)) * sg;
+                        const float e1 = ((x2 - px) * (y0 - py) - (x0 - px) * (y2 - py)) * sg;
+                        const float e2 = ((x0 - px) * (y1 - py) - (x1 - px) * (y0 - py)) * sg;
+                        covered = e0 >= margin && e1 >= margin && e2 >= margin;
+                    }
+            if (!covered) return;
+        }
         for (int i = 0; i < 3; ++i) attrs(rec, i, v[i], fst, iip ? nullptr : &v[2]);
         rec[24] = v[0].z;
         rec[25] = f2u(static_cast<float>(static_cast<std::int64_t>(v[1].z) - static_cast<std::int64_t>(v[0].z)));
