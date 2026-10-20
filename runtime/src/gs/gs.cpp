@@ -37,6 +37,9 @@ std::uint64_t g_pmode, g_smode1, g_smode2, g_srfsh, g_synch1, g_synch2, g_syncv;
 std::uint64_t g_dispfb[2], g_display[2], g_extbuf, g_extdata, g_extwrite, g_bgcolor;
 std::uint64_t g_csr = 0x551B4000ull, g_imr = 0x7F00ull, g_busdir, g_siglblid;
 std::uint64_t g_primitives = 0;
+// Image transfers started on the render side; with g_primitives it tells whether anything
+// could have changed GS memory since the last present.
+std::uint64_t g_transfer_starts = 0;
 
 #ifdef PS2_GPU
 bool gpu_on() { return gpu::mode() != gpu::Mode::off; }
@@ -590,6 +593,7 @@ void write(std::uint32_t reg, std::uint64_t value) {
     case 0x51: s.trxpos = value; break;
     case 0x52: s.trxreg = value; break;
     case 0x53:
+        ++g_transfer_starts;
         if (trace_display()) {
             std::fprintf(stderr, "[gs] trx dir %llu buf 0x%016llX pos 0x%016llX reg 0x%016llX\n", static_cast<unsigned long long>(value & 3u),
                          static_cast<unsigned long long>(s.bitbltbuf), static_cast<unsigned long long>(s.trxpos), static_cast<unsigned long long>(s.trxreg));
@@ -985,7 +989,7 @@ Rendered render_pending(const std::function<void(const DisplayRegs &)> &on_prese
     const auto start = std::chrono::steady_clock::now();
     for (std::uint32_t n = 1; queue::render().peek(h, payload); ++n) {
         if (!(n & 7u) && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() > budget_ms) return Rendered::busy;
-        bool presented = false;
+        bool presented = false, skipped = false;
         switch (h.type) {
         case queue::kGif: gif::render(static_cast<int>(h.arg0), payload, h.arg1); break;
         case queue::kGifReset: gif::render_reset(); break;
@@ -1001,7 +1005,23 @@ Rendered render_pending(const std::function<void(const DisplayRegs &)> &on_prese
         case queue::kPresent: {
             DisplayRegs regs;
             std::memcpy(&regs, payload, sizeof regs);
+            // A game drawing at 30 fps leaves every other vblank unchanged. Presenting it again
+            // costs a blit and a wait for the display, so skip it unless the display blends
+            // fields (halved output weaves with the previous present).
+            static DisplayRegs last{};
+            static bool have_last = false;
+            static std::uint64_t last_primitives = 0, last_transfers = 0;
+            const bool unchanged = have_last && std::memcmp(&regs, &last, sizeof regs) == 0 && last_primitives == g_primitives &&
+                                   last_transfers == g_transfer_starts && (regs.smode2 & 3u) != 3u;
+            if (unchanged) {
+                skipped = true;
+                break;
+            }
             on_present(regs);
+            last = regs;
+            have_last = true;
+            last_primitives = g_primitives;
+            last_transfers = g_transfer_starts;
             presented = true;
             break;
         }
@@ -1027,6 +1047,11 @@ Rendered render_pending(const std::function<void(const DisplayRegs &)> &on_prese
         default: break;
         }
         queue::render().pop(h);
+        if (skipped) {
+            g_presented.fetch_add(1);
+            queue::notify(g_presented);
+            continue;
+        }
         if (presented) {
             g_presented.fetch_add(1);
             queue::notify(g_presented);
