@@ -161,6 +161,12 @@ struct Batch {
     std::uint64_t key = ~0ull;
     int minx = 1 << 30, miny = 1 << 30, maxx = -1, maxy = -1;
     std::uint32_t fbp = 0, fbw = 0, fpsm = 0, zbp = 0, zpsm = 0;
+    // A second colour target sharing the batch's width and depth buffer. Games that draw every
+    // strip twice into two buffers (The Simpsons Game) would otherwise split into batches of a
+    // few primitives; tiles still walk their primitives in order, so per-pixel order holds.
+    bool alt = false;
+    std::uint64_t alt_key = ~0ull;
+    std::uint32_t afbp = 0, afpsm = 0;
     bool zte = false, zwrite = false;
     std::uint32_t texflushes = 0;
     int rx0 = 0, ry0 = 0, rx1 = -2, ry1 = -2;
@@ -504,11 +510,20 @@ void plan_decodes(std::uint32_t prims) {
     }
 }
 
+Range frame_pages(const Batch &b) {
+    Range fb = pages(b.fbp, b.fbw, b.fpsm, b.minx, b.miny, b.maxx, b.maxy);
+    if (b.alt) {
+        const Range a = pages(b.afbp, b.fbw, b.afpsm, b.minx, b.miny, b.maxx, b.maxy);
+        fb.add(a.lo, a.hi);
+    }
+    return fb;
+}
+
 std::uint32_t snapshot_batch(std::uint32_t prims, std::uint32_t &lo, std::uint32_t &hi) {
     Batch &b = g_batch;
     lo = hi = 0;
     if (g_batch_reads.empty()) return 0;
-    const Range fb = pages(b.fbp, b.fbw, b.fpsm, b.minx, b.miny, b.maxx, b.maxy);
+    const Range fb = frame_pages(b);
     const Range z = pages(b.zbp, b.fbw, b.zpsm, b.minx, b.miny, b.maxx, b.maxy);
     const auto written = [&](const Range &t) { return t.overlaps(fb.lo, fb.hi) || (b.zwrite && t.overlaps(z.lo, z.hi)); };
     bool any = false;
@@ -604,7 +619,10 @@ void flush_batch() {
     note_raster(prims, tiles, total, snapshot);
     g_commands.push_back({kRaster, std::min(tiles, 1024u), (tiles + 1023) / 1024, param});
     mark_rendered(pages(b.fbp, b.fbw, b.fpsm, b.minx, b.miny, b.maxx, b.maxy));
+    if (b.alt) mark_rendered(pages(b.afbp, b.fbw, b.afpsm, b.minx, b.miny, b.maxx, b.maxy));
     if (b.zwrite) mark_rendered(pages(b.zbp, b.fbw, b.zpsm, b.minx, b.miny, b.maxx, b.maxy));
+    b.alt = false;
+    b.alt_key = ~0ull;
     b.prims.clear();
     b.setups.clear();
     b.boxes.clear();
@@ -622,6 +640,10 @@ void batch_ranges() {
     b.rx1 = b.maxx;
     b.ry1 = b.maxy;
     b.fb_range = region(b.fbp, b.fbw, b.fpsm, b.minx, b.miny, b.maxx, b.maxy);
+    if (b.alt) {
+        const Range a = region(b.afbp, b.fbw, b.afpsm, b.minx, b.miny, b.maxx, b.maxy);
+        b.fb_range.add(a.lo, a.hi);
+    }
     b.z_range = region(b.zbp, b.fbw, b.zpsm, b.minx, b.miny, b.maxx, b.maxy);
 }
 
@@ -1165,7 +1187,8 @@ bool texel_rect(const std::uint32_t *setup, const Vertex *v, int count, std::uin
 
 bool shares_frame(const std::uint32_t *setup, const Batch &b) {
     const auto wide = [](std::uint32_t psm) { return psm == PSMCT32 || psm == PSMCT24 || psm == PSMT8H || psm == PSMT4HL || psm == PSMT4HH; };
-    return setup[12] == b.fbp && setup[13] == b.fbw && (setup[14] == b.fpsm || (wide(setup[14]) && wide(b.fpsm)));
+    const auto same = [&](std::uint32_t fbp, std::uint32_t fpsm) { return setup[12] == fbp && setup[13] == b.fbw && (setup[14] == fpsm || (wide(setup[14]) && wide(fpsm))); };
+    return same(b.fbp, b.fpsm) || (b.alt && same(b.afbp, b.afpsm));
 }
 
 bool drawn_under(const Batch &b, const int rect[4]) {
@@ -1460,7 +1483,28 @@ void draw(const State &st, const Vertex *v, int count) {
     Batch &b = g_batch;
     const bool zte = flags & 512u;
     const std::uint64_t key = cache.key;
-    if (b.key != ~0ull && b.key != key) emit_all();
+    if (b.key != ~0ull && b.key != key && !(b.alt && b.alt_key == key)) {
+        const bool fits = !b.alt && setup[2] == b.fbw && setup[5] == b.zbp && setup[6] == b.zpsm && !b.prims.empty();
+        bool apart = false;
+        if (fits) {
+            batch_ranges();
+            const Range mine = region(setup[1], setup[2], setup[3], minx, miny, maxx, maxy);
+            const int sx1 = static_cast<int>(setup[10] >> 16), sy1 = static_cast<int>(setup[11] >> 16);
+            const Range theirs = region(b.fbp, b.fbw, b.fpsm, 0, 0, sx1, sy1);
+            const Range own = region(setup[1], setup[2], setup[3], 0, 0, sx1, sy1);
+            apart = !own.overlaps(theirs.lo, theirs.hi) && !mine.overlaps(b.z_range.lo, b.z_range.hi);
+            for (const Range &t : g_batch_reads) apart = apart && !own.overlaps(t.lo, t.hi);
+        }
+        if (fits && apart) {
+            b.alt = true;
+            b.alt_key = key;
+            b.afbp = setup[1];
+            b.afpsm = setup[3];
+            b.rx1 = -2;
+        } else {
+            emit_all();
+        }
+    }
     const Range &tex = cache.tex;
     if (flags & 2u) {
         if (!b.prims.empty()) {
