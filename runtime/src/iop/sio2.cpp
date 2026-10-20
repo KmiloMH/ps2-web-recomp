@@ -172,13 +172,133 @@ std::uint8_t xor_of(const std::uint8_t *p, std::size_t n) {
     return v;
 }
 
+constexpr std::size_t kDataBytes = 512, kEccBytes = kPageBytes - kDataBytes;
+constexpr std::size_t kPagesPerCluster = 2, kClustersPerBlock = 8;
+constexpr std::size_t kIfcCluster = 8, kFatFirstCluster = 9, kFatClusters = 32;
+constexpr std::size_t kAllocOffset = 41, kAllocEnd = 8135;
+constexpr std::uint32_t kFatFree = 0x7FFFFFFFu, kFatLastUsed = 0xFFFFFFFFu;
+
+// Public domain PS2 memory card ECC, one 3-byte code per 128-byte chunk.
+std::uint8_t ecc_column(std::uint8_t b) {
+    static constexpr std::uint8_t table[256] = {
+        0x00, 0x87, 0x96, 0x11, 0xa5, 0x22, 0x33, 0xb4, 0xb4, 0x33, 0x22, 0xa5, 0x11, 0x96, 0x87, 0x00,
+        0xc3, 0x44, 0x55, 0xd2, 0x66, 0xe1, 0xf0, 0x77, 0x77, 0xf0, 0xe1, 0x66, 0xd2, 0x55, 0x44, 0xc3,
+        0xd2, 0x55, 0x44, 0xc3, 0x77, 0xf0, 0xe1, 0x66, 0x66, 0xe1, 0xf0, 0x77, 0xc3, 0x44, 0x55, 0xd2,
+        0x11, 0x96, 0x87, 0x00, 0xb4, 0x33, 0x22, 0xa5, 0xa5, 0x22, 0x33, 0xb4, 0x00, 0x87, 0x96, 0x11,
+        0xe1, 0x66, 0x77, 0xf0, 0x44, 0xc3, 0xd2, 0x55, 0x55, 0xd2, 0xc3, 0x44, 0xf0, 0x77, 0x66, 0xe1,
+        0x22, 0xa5, 0xb4, 0x33, 0x87, 0x00, 0x11, 0x96, 0x96, 0x11, 0x00, 0x87, 0x33, 0xb4, 0xa5, 0x22,
+        0x33, 0xb4, 0xa5, 0x22, 0x96, 0x11, 0x00, 0x87, 0x87, 0x00, 0x11, 0x96, 0x22, 0xa5, 0xb4, 0x33,
+        0xf0, 0x77, 0x66, 0xe1, 0x55, 0xd2, 0xc3, 0x44, 0x44, 0xc3, 0xd2, 0x55, 0xe1, 0x66, 0x77, 0xf0,
+        0xf0, 0x77, 0x66, 0xe1, 0x55, 0xd2, 0xc3, 0x44, 0x44, 0xc3, 0xd2, 0x55, 0xe1, 0x66, 0x77, 0xf0,
+        0x33, 0xb4, 0xa5, 0x22, 0x96, 0x11, 0x00, 0x87, 0x87, 0x00, 0x11, 0x96, 0x22, 0xa5, 0xb4, 0x33,
+        0x22, 0xa5, 0xb4, 0x33, 0x87, 0x00, 0x11, 0x96, 0x96, 0x11, 0x00, 0x87, 0x33, 0xb4, 0xa5, 0x22,
+        0xe1, 0x66, 0x77, 0xf0, 0x44, 0xc3, 0xd2, 0x55, 0x55, 0xd2, 0xc3, 0x44, 0xf0, 0x77, 0x66, 0xe1,
+        0x11, 0x96, 0x87, 0x00, 0xb4, 0x33, 0x22, 0xa5, 0xa5, 0x22, 0x33, 0xb4, 0x00, 0x87, 0x96, 0x11,
+        0xd2, 0x55, 0x44, 0xc3, 0x77, 0xf0, 0xe1, 0x66, 0x66, 0xe1, 0xf0, 0x77, 0xc3, 0x44, 0x55, 0xd2,
+        0xc3, 0x44, 0x55, 0xd2, 0x66, 0xe1, 0xf0, 0x77, 0x77, 0xf0, 0xe1, 0x66, 0xd2, 0x55, 0x44, 0xc3,
+        0x00, 0x87, 0x96, 0x11, 0xa5, 0x22, 0x33, 0xb4, 0xb4, 0x33, 0x22, 0xa5, 0x11, 0x96, 0x87, 0x00};
+    return table[b];
+}
+
+void write_ecc(std::uint8_t *page) {
+    for (int chunk = 0; chunk < 4; ++chunk) {
+        const std::uint8_t *data = page + chunk * 128;
+        std::uint8_t c0 = 0, c1 = 0, c2 = 0;
+        for (int i = 0; i < 128; ++i) {
+            const std::uint8_t c = ecc_column(data[i]);
+            c0 ^= c;
+            if (c & 0x80u) {
+                c1 ^= static_cast<std::uint8_t>(~i);
+                c2 ^= static_cast<std::uint8_t>(i);
+            }
+        }
+        page[kDataBytes + chunk * 3 + 0] = static_cast<std::uint8_t>(~c0) & 0x77u;
+        page[kDataBytes + chunk * 3 + 1] = static_cast<std::uint8_t>(~c1) & 0x7Fu;
+        page[kDataBytes + chunk * 3 + 2] = static_cast<std::uint8_t>(~c2) & 0x7Fu;
+    }
+    std::memset(page + kDataBytes + 12, 0xFF, 4); // spare reads back erased
+}
+
+void put_u16(std::uint8_t *p, std::size_t at, std::uint16_t v) {
+    p[at] = static_cast<std::uint8_t>(v);
+    p[at + 1] = static_cast<std::uint8_t>(v >> 8);
+}
+
+void put_u32(std::uint8_t *p, std::size_t at, std::uint32_t v) {
+    put_u16(p, at, static_cast<std::uint16_t>(v));
+    put_u16(p, at + 2, static_cast<std::uint16_t>(v >> 16));
+}
+
+void put_str(std::uint8_t *p, std::size_t at, const char *s, std::size_t field) {
+    std::size_t n = 0;
+    while (s[n] && n < field) {
+        p[at + n] = static_cast<std::uint8_t>(s[n]);
+        ++n;
+    }
+    std::memset(p + at + n, 0, field - n);
+}
+
+// A retail card is sold formatted, so a brand new image gets the same layout the console's own
+// mcFormat would write: superblock, indirect FAT, FAT, root directory and ECC for every page.
+void format_card() {
+    std::uint8_t *base = g_card.data.data();
+
+    std::uint8_t *superblock = base; // block 0, page 0
+    std::memset(superblock, 0xFF, kDataBytes);
+    put_str(superblock, 0x00, "Sony PS2 Memory Card Format ", 28);
+    put_str(superblock, 0x1C, "1.2.0.0", 12);
+    put_u16(superblock, 0x28, kDataBytes);
+    put_u16(superblock, 0x2A, kPagesPerCluster);
+    put_u16(superblock, 0x2C, kBlockPages);
+    put_u16(superblock, 0x2E, 0xFF00);
+    put_u32(superblock, 0x30, kPages / kPagesPerCluster);
+    put_u32(superblock, 0x34, kAllocOffset);
+    put_u32(superblock, 0x38, kAllocEnd);
+    put_u32(superblock, 0x3C, 0);
+    put_u32(superblock, 0x40, kPages / kBlockPages - 1);
+    put_u32(superblock, 0x44, kPages / kBlockPages - 2);
+    std::memset(superblock + 0x48, 0xFF, 8);
+    for (std::size_t i = 0; i < 32; ++i) put_u32(superblock, 0x50 + i * 4, i == 0 ? kIfcCluster : kFatLastUsed);
+    for (std::size_t i = 0; i < 32; ++i) put_u32(superblock, 0xD0 + i * 4, kFatLastUsed);
+    superblock[0x150] = 2;      // PS2 card
+    superblock[0x151] = 0x52;   // physical characteristics
+
+    std::memset(base + kIfcCluster * kPagesPerCluster * kPageBytes, 0xFF, kPagesPerCluster * kPageBytes);
+    for (std::size_t i = 0; i < kFatClusters; ++i) {
+        std::uint8_t *page = base + (kIfcCluster * kPagesPerCluster + i / 128) * kPageBytes;
+        put_u32(page, (i % 128) * 4, static_cast<std::uint32_t>(kFatFirstCluster + i));
+    }
+
+    for (std::size_t entry = 0; entry < kAllocEnd; ++entry) {
+        const std::size_t cluster = kFatFirstCluster + entry / 256;
+        std::uint8_t *page = base + (cluster * kPagesPerCluster + (entry % 256) / 128) * kPageBytes;
+        put_u32(page, (entry % 128) * 4, entry == 0 ? kFatLastUsed : kFatFree);
+    }
+
+    std::uint8_t *root = base + kAllocOffset * kPagesPerCluster * kPageBytes;
+    std::memset(root, 0, kPageBytes * 2);
+    put_u32(root, 0x00, 0x8227);                       // "." = dir, rwx, in use
+    put_u32(root, 0x04, 2);                             // two entries
+    put_u32(root, 0x10, 0);                             // its own cluster
+    put_u32(root + kPageBytes, 0x00, 0xA426);           // ".."
+    put_str(root, 0x40, ".", 0x20);
+    put_str(root + kPageBytes, 0x40, "..", 0x20);
+
+    for (std::size_t page = 0; page < kPages; ++page) write_ecc(base + page * kPageBytes);
+    g_card.dirty = true;
+}
+
 void load_card() {
     if (g_card.present || g_options.memcard_path.empty()) return;
     g_card.data.assign(kCardBytes, 0xFF);
     std::ifstream in(g_options.memcard_path, std::ios::binary);
-    if (in) in.read(reinterpret_cast<char *>(g_card.data.data()), static_cast<std::streamsize>(kCardBytes));
+    if (in) {
+        in.read(reinterpret_cast<char *>(g_card.data.data()), static_cast<std::streamsize>(kCardBytes));
+    } else {
+        format_card();
+    }
     g_card.present = true;
-    std::fprintf(stderr, "[mc] card in slot 1: %s%s\n", g_options.memcard_path.c_str(), in ? "" : " (new, unformatted)");
+    std::fprintf(stderr, "[mc] card in slot 1: %s%s\n", g_options.memcard_path.c_str(), in ? "" : " (new, formatted)");
 }
 
 void memory_card(std::size_t at, std::uint32_t out_size) {
