@@ -736,10 +736,12 @@ fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
         }
     }
 
-    var r = i32(at.r);
-    var g = i32(at.g);
-    var b = i32(at.b);
-    var a = i32(at.a);
+    // Same bias as the software rasterizer: keep a colour that is equal at every vertex exact.
+    let bias = 1.0 / 64.0;
+    var r = i32(at.r + bias);
+    var g = i32(at.g + bias);
+    var b = i32(at.b + bias);
+    var a = i32(at.a + bias);
     if (has(s, F_TME)) {
         var u: f32;
         var v: f32;

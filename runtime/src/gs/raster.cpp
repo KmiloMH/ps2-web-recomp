@@ -147,7 +147,12 @@ void plot(const Setup &s, int x, int y, const Attr &at) {
     const double zf = std::clamp(at.z, 0.0, static_cast<double>(zmax));
     const std::uint32_t z = static_cast<std::uint32_t>(zf);
 
-    int r = static_cast<int>(at.r), g = static_cast<int>(at.g), b = static_cast<int>(at.b), a = static_cast<int>(at.a);
+    // The GS steps colours in fixed point, so a colour that is the same at every vertex stays
+    // exact; float barycentrics land a hair under it (127.99) and truncation would drop a step.
+    // Games compare such colours as object IDs, so bias by less than a step before truncating.
+    constexpr float kColourBias = 1.0f / 64.0f;
+    int r = static_cast<int>(at.r + kColourBias), g = static_cast<int>(at.g + kColourBias), b = static_cast<int>(at.b + kColourBias),
+        a = static_cast<int>(at.a + kColourBias);
     if (s.tme) {
         float u, v;
         if (s.fst) {
