@@ -197,6 +197,24 @@ std::vector<std::uint32_t> frame_starts(const Image &image, std::uint32_t begin,
 
 }
 
+std::vector<std::uint32_t> prologue_starts(const Image &image) {
+    const auto [begin, end] = image.text();
+    std::vector<std::uint32_t> found;
+    for (std::uint32_t pc = begin; pc + 16 <= end; pc += 4) {
+        const std::uint32_t w = image.word(pc).value_or(0);
+        if ((w & 0xFFFF8000u) != 0x27BD8000u) continue;
+        for (int i = 1; i <= 3; ++i) {
+            const std::uint32_t n = image.word(pc + static_cast<std::uint32_t>(i) * 4).value_or(0);
+            const std::uint32_t op = n >> 26;
+            if ((op == 0x2Bu || op == 0x3Fu || op == 0x1Fu) && ((n >> 21) & 31u) == 29u) {
+                found.push_back(pc);
+                break;
+            }
+        }
+    }
+    return found;
+}
+
 Program analyse(const Image &image, const std::vector<std::uint32_t> &extra_entries, const std::set<std::uint32_t> &dynamic) {
     Program p;
     p.dynamic = dynamic;

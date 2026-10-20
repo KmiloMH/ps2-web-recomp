@@ -25,4 +25,8 @@ struct Program {
 
 Program analyse(const Image &image, const std::vector<std::uint32_t> &extra_entries, const std::set<std::uint32_t> &dynamic = {});
 
+// Likely function starts that the analyser cannot reach by following flow: an `addiu sp, sp, -N`
+// followed by a store to sp, the way tools/prologues.py seeds them.
+std::vector<std::uint32_t> prologue_starts(const Image &image);
+
 }

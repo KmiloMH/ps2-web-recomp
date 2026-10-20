@@ -150,7 +150,7 @@ std::vector<std::pair<std::uint32_t, std::uint32_t>> checks_for_window(const Snr
 }
 
 int usage() {
-    std::fprintf(stderr, "usage: eerecomp <elf> [--entries file] [--modules dir] [--overlays dir] [--probes file] [--out dir] [--stats]\n");
+    std::fprintf(stderr, "usage: eerecomp <elf> [--entries file] [--modules dir] [--overlays dir] [--probes file] [--out dir] [--stats] [--seed-prologues]\n");
     return 2;
 }
 
@@ -159,7 +159,7 @@ int usage() {
 int main(int argc, char **argv) {
     if (argc < 2) return usage();
     std::string elf_path = argv[1], entries_path, out, probes_path, modules_dir, overlays_dir;
-    bool stats = false;
+    bool stats = false, seed_prologues = false;
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--entries" && i + 1 < argc) entries_path = argv[++i];
@@ -168,6 +168,7 @@ int main(int argc, char **argv) {
         else if (arg == "--probes" && i + 1 < argc) probes_path = argv[++i];
         else if (arg == "--modules" && i + 1 < argc) modules_dir = argv[++i];
         else if (arg == "--overlays" && i + 1 < argc) overlays_dir = argv[++i];
+        else if (arg == "--seed-prologues") seed_prologues = true;
         else return usage();
     }
 
@@ -175,7 +176,13 @@ int main(int argc, char **argv) {
         const Image image = Image::load(elf_path);
         const Entries entries = entries_path.empty() ? Entries{} : read_entries(entries_path);
         const Links imports = snr2_imports(image);
-        Program program = analyse(image, entries.main, dynamic_sites(imports));
+        std::vector<std::uint32_t> seeds = entries.main;
+        if (seed_prologues) {
+            const std::vector<std::uint32_t> prologues = prologue_starts(image);
+            std::fprintf(stderr, "[eerecomp] --seed-prologues: %zu candidate starts\n", prologues.size());
+            seeds.insert(seeds.end(), prologues.begin(), prologues.end());
+        }
+        Program program = analyse(image, seeds, dynamic_sites(imports));
         std::map<Op, std::size_t> histogram;
         for (std::uint32_t pc = program.base; pc < program.end; pc += 4)
             if (program.is_code(pc)) ++histogram[decode(*image.word(pc), pc).op];
