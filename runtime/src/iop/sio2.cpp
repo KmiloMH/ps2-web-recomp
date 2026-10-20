@@ -200,6 +200,10 @@ void memory_card(std::size_t at, std::uint32_t out_size) {
     const std::uint8_t cmd = in[1];
     static const bool trace = std::getenv("PS2_TRACE_MC") != nullptr;
     if (trace) std::fprintf(stderr, "[mc] cmd %02X in %zu out %zu page %zu\n", cmd, in.size(), n, c.address / kPageBytes);
+
+    // A card that answers reports 0x00 0x00 (0xFF 0xFF means "no card") and pads the reply with
+    // 0x00, matching the reference protocol framing.
+    for (std::size_t i = 0; i < n; ++i) put(i, 0x00);
     switch (cmd) {
     case 0x21: case 0x22: case 0x23: {
         const std::uint32_t page = in.size() > 5 ? static_cast<std::uint32_t>(in[2] | (in[3] << 8) | (in[4] << 16) | (in[5] << 24)) : 0u;
@@ -222,14 +226,24 @@ void memory_card(std::size_t at, std::uint32_t out_size) {
     case 0x28:
         put(2, 0x2B);
         put(3, c.term);
-        put(4, 0x55);
+        put(4, c.term);
         break;
     case 0x42: {
         const std::size_t len = in.size() > 2 ? in[2] : 0;
-        for (std::size_t i = 0; i < len && 3 + i < in.size() && c.address < kCardBytes; ++i) c.data[c.address++] = in[3 + i];
+        std::uint8_t sum = 0;
+        put(2, 0x00);
+        put(3, 0x2B);
+        for (std::size_t i = 0; i < len; ++i) {
+            const std::uint8_t v = 3 + i < in.size() ? in[3 + i] : 0xFF;
+            sum ^= v;
+            if (c.address < kCardBytes) c.data[c.address] = v;
+            ++c.address;
+            put(4 + i, 0x00);
+        }
+        put(4 + len, sum);
+        put(5 + len, c.term);
         c.dirty = true;
         c.quiet = 0;
-        ack(2);
         break;
     }
     case 0x43: {
@@ -254,6 +268,11 @@ void memory_card(std::size_t at, std::uint32_t out_size) {
         ack(2);
         break;
     }
+    case 0xF3:
+        // MCMAN reads the terminator straight after this auth command and expects READY.
+        c.term = 0x5A;
+        ack(2);
+        break;
     default:
         ack(2);
         break;
