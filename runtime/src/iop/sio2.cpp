@@ -277,6 +277,11 @@ void memory_card(std::size_t at, std::uint32_t out_size) {
         ack(2);
         break;
     }
+    if (trace) {
+        std::fprintf(stderr, "[mcr] cmd=%02X reply=", cmd);
+        for (std::size_t i = 0; i < 16 && i < n; ++i) std::fprintf(stderr, "%02X ", g_out[at + i]);
+        std::fprintf(stderr, "\n");
+    }
 }
 
 void process() {
@@ -284,6 +289,12 @@ void process() {
     const std::uint32_t in_size = (reg >> 8) & 0x1FFu, out_size = (reg >> 18) & 0x1FFu;
     if (g_in.size() < in_size) return;
     const int port = static_cast<int>(reg & 3u);
+    static const bool traceq = std::getenv("PS2_TRACE_MC") != nullptr;
+    if (traceq && port == 2) {
+        std::fprintf(stderr, "[mcq] idx=%u reg=%08X in=%u out=%u got=%zu first=", g_index, reg, in_size, out_size, g_in.size());
+        for (std::size_t i = 0; i < 10 && i < g_in.size(); ++i) std::fprintf(stderr, "%02X ", g_in[i]);
+        std::fprintf(stderr, "\n");
+    }
     const std::size_t at = g_out.size();
     for (std::uint32_t i = 0; i < out_size; ++i) g_out.push_back(0xFF);
     if (g_index == 0) g_stat = 0x1100u;
@@ -297,6 +308,8 @@ void process() {
 
 void run_transfer() {
     Dma &in = g_dma[0], &out = g_dma[1];
+    static const bool tracex = std::getenv("PS2_TRACE_MC") != nullptr;
+    if (tracex) std::fprintf(stderr, "[mcdma] xfer in=%d out=%d pending=%zu\n", static_cast<int>(in.armed), static_cast<int>(out.armed), g_out.size());
     if (in.armed) {
         for (std::uint32_t b = 0; b < in.blocks; ++b) {
             for (std::uint32_t i = 0; i < in.block_words * 4; ++i) g_in.push_back(read8(in.madr + b * in.block_words * 4 + i));
@@ -403,6 +416,8 @@ void write(std::uint32_t a, std::uint32_t v) {
 }
 
 void arm_dma(int channel, std::uint32_t madr, std::uint32_t block_words, std::uint32_t blocks) {
+    static const bool traced = std::getenv("PS2_TRACE_MC") != nullptr;
+    if (traced) std::fprintf(stderr, "[mcdma] arm ch=%d madr=%08X block_words=%u blocks=%u\n", channel, madr, block_words, blocks);
     Dma &d = g_dma[channel == 11 ? 0 : 1];
     d.armed = true;
     d.madr = madr;
