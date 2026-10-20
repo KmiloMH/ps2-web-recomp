@@ -269,8 +269,8 @@ void memory_card(std::size_t at, std::uint32_t out_size) {
         break;
     }
     case 0xF3:
-        // MCMAN reads the terminator straight after this auth command and expects READY.
-        c.term = 0x5A;
+        // MCMAN reads the terminator straight after this auth command and expects READY (0x55).
+        c.term = 0x55;
         ack(2);
         break;
     default:
