@@ -985,6 +985,7 @@ Rendered render_pending(const std::function<void(const DisplayRegs &)> &on_prese
         switch (h.type) {
         case queue::kGif: gif::render(static_cast<int>(h.arg0), payload, h.arg1); break;
         case queue::kGifReset: gif::render_reset(); break;
+        case queue::kPath3Mask: gif::render_path3_mask(h.arg0 != 0); break;
         case queue::kReset: render_reset(); break;
         case queue::kVertexReset: g_state.count = 0; break;
         case queue::kVblank:

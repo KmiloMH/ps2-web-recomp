@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace ps2::gif {
 
@@ -23,6 +24,9 @@ struct Path {
 
 Path g_paths[4];
 std::uint32_t g_stat = 0;
+// PATH3 data that arrived while VIF1 MSKPATH3 held the path, replayed on unmask (render side).
+std::vector<std::uint8_t> g_path3_held;
+bool g_path3_hold = false;
 std::uint64_t g_tags[4][4];
 
 template <typename Sink>
@@ -158,11 +162,35 @@ void reset() {
 
 void render_reset() {
     for (Path &p : g_paths) p = Path{};
+    g_path3_held.clear();
+    g_path3_hold = false;
 }
 
 void render(int path, const std::uint8_t *data, std::uint32_t qwc) {
+    if (path == 3 && g_path3_hold) {
+        g_path3_held.insert(g_path3_held.end(), data, data + static_cast<std::size_t>(qwc) * 16);
+        return;
+    }
     GsSink sink{path};
     walk(g_paths[path], data, qwc, sink);
+}
+
+// A real GIF stalls channel 2 while MSKPATH3 is set and lets it through on unmask, so
+// textures a game streams over PATH3 land between the PATH1 draws it fences them with.
+// Transfers here complete at once; hold their data until the mask drops instead.
+void render_path3_mask(bool masked) {
+    g_path3_hold = masked;
+    if (masked || g_path3_held.empty()) return;
+    std::vector<std::uint8_t> held;
+    held.swap(g_path3_held);
+    GsSink sink{3};
+    walk(g_paths[3], held.data(), static_cast<std::uint32_t>(held.size() / 16), sink);
+}
+
+// Called from the side that executes the VIF1 stream in order with the GIF paths.
+void order_path3_mask(bool masked) {
+    if (gs::queue::active()) gs::queue::post(gs::queue::kPath3Mask, masked ? 1u : 0u, 0, nullptr, 0);
+    else render_path3_mask(masked);
 }
 
 void transfer(int path, const std::uint8_t *data, std::uint32_t qwc) {
