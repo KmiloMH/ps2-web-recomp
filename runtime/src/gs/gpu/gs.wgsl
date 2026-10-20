@@ -239,6 +239,30 @@ fn store(l: Loc, k: u32, value: u32) {
     atomicOr(&vram[w], (value & l.mask) << l.shift);
 }
 
+// Raster writes: within a dispatch each pixel (and each depth sample) belongs to one invocation,
+// so no other thread changes these bits; flipping only the bits that differ takes one atomic
+// instead of an AND and an OR, and none when the value is unchanged.
+fn store_field(l: Loc, k: u32, old: u32, value: u32) {
+    let d = (old ^ value) & l.mask;
+    if (d == 0u) {
+        return;
+    }
+    let w = l.word * SCALE * SCALE + k;
+    if (l.mask == 0xFFFFFFFFu) {
+        atomicStore(&vram[w], value);
+    } else {
+        atomicXor(&vram[w], d << l.shift);
+    }
+}
+
+fn store_raster(l: Loc, k: u32, value: u32) {
+    if (l.mask == 0xFFFFFFFFu) {
+        atomicStore(&vram[l.word * SCALE * SCALE + k], value);
+        return;
+    }
+    store_field(l, k, load_at(l, k), value);
+}
+
 fn write_sample(psm: u32, bp: u32, bw: u32, x: u32, y: u32, k: u32, value: u32) {
     store(locate(psm, bp, bw, x, y), k, value);
 }
@@ -663,21 +687,21 @@ fn write_frame(s: Setup, l: Loc, k: u32, c: u32, mask: u32) {
             if ((mask & 0x80000000u) != 0u) {
                 m16 = m16 | 0x8000u;
             }
-            store(l, k, (pack16(c) & ~m16) | (old & m16));
+            store_field(l, k, old, (pack16(c) & ~m16) | (old & m16));
         }
         case 0x01u {
             let l32 = Loc(l.word, 0u, 0xFFFFFFFFu);
             let old = load_at(l32, k);
             let m = mask | 0xFF000000u;
-            store(l32, k, (c & ~m) | (old & m));
+            store_field(l32, k, old, (c & ~m) | (old & m));
         }
         default {
-            var v = c;
             if (mask != 0u) {
                 let old = load_at(l, k);
-                v = (c & ~mask) | (old & mask);
+                store_field(l, k, old, (c & ~mask) | (old & mask));
+            } else {
+                store_raster(l, k, c);
             }
-            store(l, k, v);
         }
     }
 }
@@ -920,7 +944,7 @@ fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
         write_frame(s, fl, k, u32(r) | (u32(g) << 8u) | (u32(b) << 16u) | (out_a << 24u), mask);
     }
     if (write_z && zte) {
-        store(zl, k, z);
+        store_raster(zl, k, z);
     }
 }
 
