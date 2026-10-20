@@ -75,6 +75,8 @@ std::map<std::uint32_t, Call> g_held_calls;
 std::map<std::uint32_t, std::deque<Request>> g_requests;
 std::map<std::uint32_t, int> g_queue_threads;
 std::map<std::uint32_t, CmdHandler> g_cmd_handlers;
+// Unhandled commands can arrive thousands of times per run, so they are counted, not printed.
+std::map<std::uint32_t, std::uint64_t> g_unhandled_counts;
 std::uint32_t g_sreg[32] = {};
 std::map<std::uint32_t, int> g_iop_clients;
 std::uint32_t g_iop_rpc_id = 1;
@@ -251,7 +253,8 @@ void command(std::uint32_t src, std::uint32_t size) {
     default: {
         auto it = g_cmd_handlers.find(h->cid);
         if (it == g_cmd_handlers.end()) {
-            std::fprintf(stderr, "[sif] command 0x%08X has no handler (from ee buffer 0x%08X)\n", h->cid, src);
+            if (g_unhandled_counts[h->cid]++ == 0)
+                std::fprintf(stderr, "[sif] command 0x%08X has no handler (from ee buffer 0x%08X)\n", h->cid, src);
             break;
         }
         std::memcpy(iop::ram_ptr(kCmdBuffer), packet, std::min<std::uint32_t>(size, 0x400u));
@@ -687,6 +690,7 @@ void reset() {
     g_requests.clear();
     g_queue_threads.clear();
     g_cmd_handlers.clear();
+    g_unhandled_counts.clear();
     g_iop_clients.clear();
     std::memset(g_sreg, 0, sizeof g_sreg);
     g_iop_dma_id = g_ee_dma_id = 1;
@@ -789,6 +793,8 @@ void dump() {
     for (const auto &[queue, list] : g_requests)
         if (!list.empty()) std::fprintf(stderr, "[sif] queue 0x%08X has %zu requests\n", queue, list.size());
     for (const auto &[id, b] : g_binds) std::fprintf(stderr, "[sif] bind to 0x%08X is waiting\n", id);
+    for (const auto &[cid, count] : g_unhandled_counts)
+        std::fprintf(stderr, "[sif] command 0x%08X has no handler, %llu times\n", cid, static_cast<unsigned long long>(count));
     std::fprintf(stderr, "[sif] %zu packets wait for the EE (processed %d)\n", g_outgoing.size(), g_processed ? 1 : 0);
 }
 
