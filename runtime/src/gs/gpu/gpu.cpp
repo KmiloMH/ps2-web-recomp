@@ -964,9 +964,10 @@ void submit(WGPUTextureView present_view = nullptr) {
         print_profile_summary();
         g_profile_summary = false;
     }
-    if (g_profile_out && !present_view && g_timestamps && frame_count() >= g_profile_from && frame_count() < g_profile_to) {
-        profile_submit();
-        return;
+    if (g_profile_out && g_timestamps && frame_count() >= g_profile_from && frame_count() < g_profile_to) {
+        // The browser presents with every submit; profile the commands, then present on its own.
+        if (!g_commands.empty()) profile_submit();
+        if (!present_view) return;
     }
     ensure_capacity();
     wgpuQueueWriteBuffer(g_queue, g_data, 0, g_arena.data(), g_arena.size() * 4);
