@@ -114,6 +114,28 @@ def read_at(image, sector, offset, size):
     return image.file.read(size)
 
 
+EMBEDDED_SCAN_LIMIT = 64 << 20
+
+
+def embedded_modules(image, path, sector, size):
+    # Some engines (Rebellion's Asura, for one) wrap SNR2 modules inside their
+    # own containers instead of storing them as files or AFS entries. Any
+    # 4-byte aligned SNR2 header whose tables fit its declared size counts.
+    data = read_at(image, sector, 0, size)
+    found = []
+    at = data.find(b'SNR2')
+    while at != -1:
+        if at % 4 == 0 and at + 0x40 <= size:
+            rel, nrel, sym, nsym = struct.unpack_from('<IIII', data, at + 4)
+            length = struct.unpack_from('<I', data, at + 0x2C)[0]
+            if 0x40 <= length <= size - at and rel + nrel * 12 <= length and sym + nsym * 12 <= length:
+                found.append(('%s_%08x' % (path.replace('/', '_'), at), sector, at, length))
+                at = data.find(b'SNR2', at + length)
+                continue
+        at = data.find(b'SNR2', at + 4)
+    return found
+
+
 def modules(image, destination):
     found = []
     for path, _, sector, size in image.files():
@@ -127,6 +149,8 @@ def modules(image, destination):
                 offset, length = struct.unpack_from('<II', table, index * 8)
                 if offset + 4 <= size and read_at(image, sector, offset, 4) == b'SNR2':
                     found.append(('%s_%04d' % (path.replace('/', '_'), index), sector, offset, length))
+        elif size <= EMBEDDED_SCAN_LIMIT:
+            found.extend(embedded_modules(image, path, sector, size))
     os.makedirs(destination, exist_ok=True)
     for name, sector, offset, length in found:
         with open(os.path.join(destination, name + '.snr'), 'wb') as out:
