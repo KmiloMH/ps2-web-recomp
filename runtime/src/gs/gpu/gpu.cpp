@@ -133,6 +133,19 @@ struct Range {
     }
 };
 
+// CLUT loads are deduplicated: a slot's content is described by what each 16-entry segment
+// was last loaded from, and a load whose result already sits in a live slot just selects it.
+// Slots are still handed out in order (g_clut_next), so draws already recorded keep theirs.
+constexpr std::uint32_t kClutSegments = 32;
+std::uint32_t g_clut_next = 1;
+std::uint64_t g_clut_segment[kClutSegments] = {};
+std::uint64_t g_clut_epoch = 1;
+Range g_clut_sources;
+std::unordered_map<std::uint64_t, std::uint32_t> g_clut_known;
+std::vector<std::uint64_t> g_clut_slot_content;
+void batch_ranges();
+void clut_sources_written(const Range &r);
+
 struct Batch {
     std::vector<std::uint32_t> prims;
     std::vector<std::uint32_t> setups;
@@ -527,6 +540,9 @@ void flush_batch() {
         b.key = ~0ull;
         return;
     }
+    batch_ranges();
+    clut_sources_written(b.fb_range);
+    if (b.zte) clut_sources_written(b.z_range);
     const std::uint32_t prims = static_cast<std::uint32_t>(b.prims.size() / kPrimWords);
     g_touched.clear();
     g_spans.clear();
@@ -648,6 +664,26 @@ void emit_all() {
     flush_batch();
 }
 
+std::uint64_t clut_mix(std::uint64_t h, std::uint64_t v) {
+    h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+    return h * 0xFF51AFD7ED558CCDull;
+}
+
+// Anything that writes GS memory a recorded CLUT was read from makes later loads from there new.
+void clut_sources_written(const Range &r) {
+    if (!g_clut_sources.overlaps(r.lo, r.hi)) return;
+    ++g_clut_epoch;
+    g_clut_sources = Range{};
+}
+
+void clut_forget() {
+    ++g_clut_epoch;
+    g_clut_sources = Range{};
+    g_clut_known.clear();
+    std::fill(g_clut_slot_content.begin(), g_clut_slot_content.end(), 0);
+    for (std::uint32_t i = 0; i < kClutSegments; ++i) g_clut_segment[i] = clut_mix(g_clut_epoch, 0x5EED0000u + i);
+}
+
 void queue_pre(const PreOp &op) {
     if (batch_conflict(op.range, op.clut)) emit_all();
     g_pre.push_back(op);
@@ -679,6 +715,7 @@ std::uint64_t queue_upload(const std::uint8_t *bytes, std::size_t size, std::uin
     op.y0 = im.dsay + first;
     op.y1 = im.dsay + last;
     op.image = im.id;
+    clut_sources_written(op.range);
     queue_pre(op);
     im.done += pixels;
     return used;
@@ -1461,6 +1498,11 @@ void local_copy(const State &s) {
     const std::uint64_t buf = s.bitbltbuf, pos = s.trxpos, reg = s.trxreg;
     const std::uint32_t w = static_cast<std::uint32_t>(reg) & 0xFFFu, h = static_cast<std::uint32_t>(reg >> 32) & 0xFFFu;
     if (!w || !h) return;
+    {
+        const int dx = static_cast<int>(pos >> 32) & 0x7FF, dy = static_cast<int>(pos >> 48) & 0x7FF;
+        clut_sources_written(region(static_cast<std::uint32_t>(buf >> 32) & 0x3FFFu, static_cast<std::uint32_t>(buf >> 48) & 0x3Fu,
+                                    static_cast<std::uint32_t>(buf >> 56) & 0x3Fu, dx, dy, dx + static_cast<int>(w) - 1, dy + static_cast<int>(h) - 1));
+    }
     mark_rendered(pages(static_cast<std::uint32_t>(buf >> 32) & 0x3FFFu, static_cast<std::uint32_t>(buf >> 48) & 0x3Fu, static_cast<std::uint32_t>(buf >> 56) & 0x3Fu,
                         static_cast<int>(pos >> 32) & 0x7FF, static_cast<int>(pos >> 48) & 0x7FF, (static_cast<int>(pos >> 32) & 0x7FF) + static_cast<int>(w) - 1,
                         (static_cast<int>(pos >> 48) & 0x7FF) + static_cast<int>(h) - 1));
@@ -1481,17 +1523,46 @@ void load_clut(std::uint64_t tex0, std::uint64_t texclut) {
     }
     const std::uint32_t psm = static_cast<std::uint32_t>(tex0 >> 20) & 0x3Fu;
     const std::uint32_t cpsm = (static_cast<std::uint32_t>(tex0 >> 51) & 0xFu) == 0 ? PSMCT32 : static_cast<std::uint32_t>(tex0 >> 51) & 0xFu;
-    const std::uint32_t next = (g_clut_slot + 1) % kClutSlots;
     const std::uint32_t tc = static_cast<std::uint32_t>(texclut);
     const std::uint32_t cbp = static_cast<std::uint32_t>(tex0 >> 37) & 0x3FFFu, csm = static_cast<std::uint32_t>(tex0 >> 55) & 1u;
     const std::uint32_t cbw = tc & 0x3Fu, cou = (tc >> 6) & 0x3Fu, cov = (tc >> 12) & 0x3FFu;
+    const std::uint32_t csa = static_cast<std::uint32_t>(tex0 >> 56) & 0x1Fu;
+    const bool eight = psm == PSMT8 || psm == PSMT8H;
+    const Range range = csm ? region(cbp, cbw, cpsm, static_cast<int>(cou * 16), static_cast<int>(cov), static_cast<int>(cou * 16 + 255), static_cast<int>(cov))
+                            : region(cbp, 1, cpsm, 0, 0, 15, 15);
+
+    // The segments this load rewrites (the shader's addressing): CSM2 writes from csa*16 on,
+    // CSM1 writes segment csa&15, or the first 256 entries for an 8-bit texture.
+    if (g_clut_slot_content.empty()) {
+        g_clut_slot_content.assign(kClutSlots, 0);
+        for (std::uint32_t i = 0; i < kClutSegments; ++i) g_clut_segment[i] = clut_mix(g_clut_epoch, 0x5EED0000u + i);
+    }
+    std::uint64_t segments[kClutSegments];
+    std::memcpy(segments, g_clut_segment, sizeof segments);
+    const std::uint32_t first = csm ? csa : (eight ? 0u : (csa & 15u)), count = eight ? 16u : 1u;
+    std::uint64_t source = clut_mix(clut_mix(clut_mix(g_clut_epoch, cbp), (cpsm << 8) | (csm << 7) | (eight ? 64u : 0u) | csa), (cbw << 26) | (cou << 20) | cov);
+    for (std::uint32_t i = 0; i < count; ++i) segments[(first + i) % kClutSegments] = clut_mix(source, i);
+    std::uint64_t content = 0;
+    for (std::uint64_t v : segments) content = clut_mix(content, v);
+    if (const auto it = g_clut_known.find(content); it != g_clut_known.end() && g_clut_slot_content[it->second] == content) {
+        g_clut_slot = it->second;
+        std::memcpy(g_clut_segment, segments, sizeof segments);
+        return;
+    }
+
+    const std::uint32_t next = g_clut_next;
+    g_clut_next = (g_clut_next + 1) % kClutSlots;
     PreOp op;
     op.clut = true;
-    const std::uint32_t rec[10] = {g_clut_slot, next, cbp, cpsm, csm, static_cast<std::uint32_t>(tex0 >> 56) & 0x1Fu, (psm == PSMT8 || psm == PSMT8H) ? 1u : 0u, cbw, cou, cov};
+    const std::uint32_t rec[10] = {g_clut_slot, next, cbp, cpsm, csm, csa, eight ? 1u : 0u, cbw, cou, cov};
     std::memcpy(op.rec, rec, sizeof rec);
-    op.range = csm ? region(cbp, cbw, cpsm, static_cast<int>(cou * 16), static_cast<int>(cov), static_cast<int>(cou * 16 + 255), static_cast<int>(cov))
-                   : region(cbp, 1, cpsm, 0, 0, 15, 15);
+    op.range = range;
     queue_pre(op);
+    if (const std::uint64_t old = g_clut_slot_content[next]) g_clut_known.erase(old);
+    g_clut_slot_content[next] = content;
+    g_clut_known[content] = next;
+    g_clut_sources.add(range.lo, range.hi);
+    std::memcpy(g_clut_segment, segments, sizeof segments);
     g_clut_slot = next;
     ++g_clut_loads;
 }
@@ -1608,6 +1679,7 @@ void write_state(const std::vector<std::uint32_t> &vram, std::uint32_t scale, co
         wgpuQueueWriteBuffer(g_queue, g_vram, 0, layers.data(), layers.size() * 4);
     }
     if (clut.size() >= kClutEntries) wgpuQueueWriteBuffer(g_queue, g_clut, static_cast<std::uint64_t>(g_clut_slot) * kClutEntries * 4, clut.data(), kClutEntries * 4);
+    if (!g_clut_slot_content.empty()) clut_forget();
     wait_idle();
 }
 
