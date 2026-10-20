@@ -251,6 +251,9 @@ void command(std::uint32_t src, std::uint32_t size) {
     default: {
         auto it = g_cmd_handlers.find(h->cid);
         if (it == g_cmd_handlers.end()) {
+            // 0x80000004 is a Sony-SDK command (absent from ps2sdk's sifcmd.h) whose payload is a
+            // named-semaphore string. The EE re-sends it roughly every 2.5 frames and never gets a
+            // reply, yet the game still boots to the menu: left unhandled on purpose, see T-102.
             std::fprintf(stderr, "[sif] command 0x%08X has no handler (from ee buffer 0x%08X)\n", h->cid, src);
             break;
         }
