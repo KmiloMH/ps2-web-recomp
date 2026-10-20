@@ -346,6 +346,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE double ps2web_frames() { return static_cast<doub
 extern "C" EMSCRIPTEN_KEEPALIVE double ps2web_primitives() { return static_cast<double>(ps2::primitives_drawn()); }
 extern "C" EMSCRIPTEN_KEEPALIVE void *ps2web_audio_ring() { return &g_audio; }
 extern "C" EMSCRIPTEN_KEEPALIVE double ps2web_audio_queued_ms() { return audio_queued_ms(); }
+extern "C" EMSCRIPTEN_KEEPALIVE void ps2web_request_state() { ps2::request_state_save("/export.state"); }
 extern "C" EMSCRIPTEN_KEEPALIVE double ps2web_vu_interpreted() { return static_cast<double>(ps2::vu1_interpreted_calls()); }
 extern "C" EMSCRIPTEN_KEEPALIVE double ps2web_idle_ms(int which) {
     if (which == 2) return ps2::vu_thread_idle_ms();

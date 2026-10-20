@@ -354,6 +354,36 @@ document.addEventListener('webkitfullscreenchange', onFullscreenChange);
 fullscreenButton.addEventListener('click', toggleFullscreen);
 document.getElementById('exit-fullscreen').addEventListener('click', toggleFullscreen);
 canvas.addEventListener('dblclick', toggleFullscreen);
+// F9 saves the machine state and downloads it, so a moment can be reproduced later
+// (load it with ?state=<file> next to the page, or with ps2run --load-state).
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'F9' || e.repeat || !Module._ps2web_request_state) return;
+  e.preventDefault();
+  try { FS.unlink('/export.state'); } catch (err) {}
+  const frame = Module._ps2web_frames();
+  Module._ps2web_request_state();
+  note('Saving state…');
+  let last = -1, tries = 0;
+  const poll = () => {
+    let size = -1;
+    try { size = FS.stat('/export.state').size; } catch (err) {}
+    if (size > 0 && size === last) {
+      const data = FS.readFile('/export.state');
+      FS.unlink('/export.state');
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(new Blob([data], { type: 'application/octet-stream' }));
+      link.download = 'simpsons-' + frame + '.state';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+      note('State saved: ' + link.download);
+      return;
+    }
+    last = size;
+    if (++tries < 100) setTimeout(poll, 200);
+    else note('Could not save the state');
+  };
+  setTimeout(poll, 200);
+});
 window.addEventListener('keydown', (e) => {
   if (e.code !== 'KeyF' || e.repeat || e.target.tagName === 'SELECT') return;
   e.preventDefault();
