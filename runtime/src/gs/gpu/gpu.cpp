@@ -14,6 +14,9 @@
 #include <cstring>
 #include <deque>
 #include <memory>
+#include <map>
+#include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -86,6 +89,11 @@ struct CommandInfo {
 };
 std::vector<CommandInfo> g_command_info;
 std::FILE *g_profile_out = nullptr;
+// PS2_GPU_PROFILE=from,to,summary keeps the per-dispatch lines in memory and prints totals by
+// pipeline and by batch kind when the window ends (the browser has no file to write them to).
+char *g_profile_buffer = nullptr;
+std::size_t g_profile_size = 0;
+bool g_profile_summary = false;
 std::uint64_t g_profile_from = 0, g_profile_to = 0;
 WGPUQuerySet g_profile_queries = nullptr;
 WGPUBuffer g_profile_resolve = nullptr, g_profile_read = nullptr;
@@ -881,8 +889,59 @@ void profile_submit() {
 }
 
 // Browsers copy writes above about 1 MiB through a slower path, so large uploads go in pieces.
+void print_profile_summary() {
+    std::fflush(g_profile_out);
+    static const char *const kKinds[4] = {"triangle", "sprite", "line", "point"};
+    std::map<std::string, std::uint64_t> pipes;
+    std::map<std::string, std::array<std::uint64_t, 4>> kinds;
+    std::set<std::uint64_t> frames;
+    const char *at = g_profile_buffer, *end = g_profile_buffer + g_profile_size;
+    while (at && at < end) {
+        const char *eol = static_cast<const char *>(std::memchr(at, '\n', static_cast<std::size_t>(end - at)));
+        if (!eol) eol = end;
+        std::istringstream line(std::string(at, eol));
+        at = eol + 1;
+        unsigned long long frame = 0, ns = 0;
+        unsigned index = 0, a = 0, b = 0;
+        std::string pipe;
+        if (!(line >> frame >> index >> pipe >> ns >> a >> b)) continue;
+        frames.insert(frame);
+        pipes[pipe] += ns;
+        unsigned long long v[8] = {};
+        int got = 0;
+        while (got < 8 && line >> v[got]) ++got;
+        if (got < 8) continue;
+        const unsigned kind = static_cast<unsigned>(v[4]), formats = static_cast<unsigned>(v[5]), flags = static_cast<unsigned>(v[6]);
+        char key[160];
+        std::snprintf(key, sizeof key, "%s %s %s frame %02x %s%s%s", pipe.c_str(), v[0] > 1000 ? "over 1000" : v[0] > 16 ? "over 16" : "up to 16",
+                      kind < 4 ? kKinds[kind] : "?", formats & 0xFFu, v[7] ? "textured" : "untextured", (flags & 512u) ? " z" : "", (flags & 8u) ? " blend" : "");
+        auto &k = kinds[key];
+        k[0] += ns;
+        k[1] += 1;
+        k[2] += v[0];
+        k[3] += v[1];
+    }
+    const double n = static_cast<double>(std::max<std::size_t>(frames.size(), 1));
+    std::uint64_t total = 0;
+    for (const auto &[name, ns] : pipes) total += ns;
+    std::fprintf(stderr, "[gpuprof] %zu frames, %.2f ms GPU per frame\n", frames.size(), static_cast<double>(total) / n / 1e6);
+    for (const auto &[name, ns] : pipes) std::fprintf(stderr, "[gpuprof]   %-10s %7.2f ms\n", name.c_str(), static_cast<double>(ns) / n / 1e6);
+    std::vector<std::pair<std::uint64_t, std::string>> order;
+    for (const auto &[key, k] : kinds) order.emplace_back(k[0], key);
+    std::sort(order.rbegin(), order.rend());
+    for (std::size_t i = 0; i < order.size() && i < 14; ++i) {
+        const auto &k = kinds[order[i].second];
+        std::fprintf(stderr, "[gpuprof] %7.2f ms %6.1f batches %8.0f prims %8.0f tiles  %s\n", static_cast<double>(k[0]) / n / 1e6, k[1] / n, k[2] / n, k[3] / n,
+                     order[i].second.c_str());
+    }
+}
+
 void submit(WGPUTextureView present_view = nullptr) {
     if (g_commands.empty() && !present_view) return;
+    if (g_profile_summary && g_profile_out && frame_count() >= g_profile_to) {
+        print_profile_summary();
+        g_profile_summary = false;
+    }
     if (g_profile_out && !present_view && g_timestamps && frame_count() >= g_profile_from && frame_count() < g_profile_to) {
         profile_submit();
         return;
@@ -1204,7 +1263,8 @@ bool init(Mode m) {
         char path[512] = {};
         unsigned long long a = 0, z = 0;
         if (std::sscanf(spec, "%llu,%llu,%511s", &a, &z, path) == 3) {
-            g_profile_out = std::fopen(path, "w");
+            g_profile_summary = std::strcmp(path, "summary") == 0;
+            g_profile_out = g_profile_summary ? open_memstream(&g_profile_buffer, &g_profile_size) : std::fopen(path, "w");
             g_profile_from = a;
             g_profile_to = z;
         }
