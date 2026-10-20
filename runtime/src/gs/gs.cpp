@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <functional>
@@ -469,16 +470,89 @@ void reset() {
     else render_reset();
 }
 
+std::uint32_t storage_bits(std::uint32_t psm) {
+    switch (psm) {
+    case PSMCT16: case PSMCT16S: case PSMZ16: case PSMZ16S: return 16;
+    case PSMT8: return 8;
+    case PSMT4: return 4;
+    default: return 32;
+    }
+}
+
+// The GS picks a mipmap level from LOD = (log2(1/|Q|) << L) + K, or K alone with LCM.
+// Rasterizers here sample one level, so choose it once per primitive from the vertices'
+// average LOD and point the context's TEX0 at that level for the draw. Returns false when
+// the base level applies as is.
+bool select_mip(State &s, Context &x, std::uint64_t attr, int needed) {
+    const std::uint32_t mmin = static_cast<std::uint32_t>(x.tex1 >> 6) & 7u, mxl = static_cast<std::uint32_t>(x.tex1 >> 2) & 7u;
+    if (mmin < 2 || mmin > 5 || mxl == 0) return false;
+    float k = static_cast<float>(static_cast<std::int32_t>((static_cast<std::uint32_t>(x.tex1 >> 32) & 0xFFFu) ^ 0x800u) - 0x800) / 16.0f;
+    float lod = k;
+    if (!(x.tex1 & 1u)) {
+        float sum = 0.0f;
+        for (int i = 0; i < needed; ++i) sum += std::log2(1.0f / std::max(std::fabs(s.queue[i].q), 1e-6f));
+        lod = sum / static_cast<float>(needed) * static_cast<float>(1u << ((x.tex1 >> 19) & 3u)) + k;
+    }
+    if (lod <= 0.0f) return false;
+    const bool nearest_level = mmin == 2 || mmin == 4;
+    std::uint32_t level = static_cast<std::uint32_t>(nearest_level ? lod + 0.5f : lod);
+    level = std::min(level, mxl);
+    const bool linear = mmin == 4 || mmin == 5;
+    x.tex1 = (x.tex1 & ~0x20ull) | (linear ? 0x20ull : 0ull);
+    if (level == 0) return true;
+
+    const std::uint32_t psm = static_cast<std::uint32_t>(x.tex0 >> 20) & 0x3Fu;
+    std::uint32_t tbp = static_cast<std::uint32_t>(x.tex0) & 0x3FFFu, tbw = static_cast<std::uint32_t>(x.tex0 >> 14) & 0x3Fu;
+    std::uint32_t tw = static_cast<std::uint32_t>(x.tex0 >> 26) & 0xFu, th = static_cast<std::uint32_t>(x.tex0 >> 30) & 0xFu;
+    if ((x.tex1 >> 9) & 1u && level <= 3) {
+        // MTBA: levels 1-3 follow each other in memory.
+        for (std::uint32_t l = 0; l < level; ++l) {
+            tbp += static_cast<std::uint32_t>((static_cast<std::uint64_t>(1u << tw) * (1u << th) * storage_bits(psm)) >> 11);
+            tbw = std::max(tbw >> 1, 1u);
+            tw = tw ? tw - 1 : 0;
+            th = th ? th - 1 : 0;
+        }
+    } else {
+        const std::uint64_t reg = level <= 3 ? x.miptbp1 : x.miptbp2;
+        const std::uint32_t slot = (level - 1) % 3;
+        tbp = static_cast<std::uint32_t>(reg >> (slot * 20)) & 0x3FFFu;
+        tbw = static_cast<std::uint32_t>(reg >> (slot * 20 + 14)) & 0x3Fu;
+        tw = tw > level ? tw - level : 0;
+        th = th > level ? th - level : 0;
+    }
+    x.tex0 = (x.tex0 & ~0x3FFFFFFFFull) | tbp | (static_cast<std::uint64_t>(tbw) << 14) | ((x.tex0 & (0x3Full << 20))) |
+             (static_cast<std::uint64_t>(tw) << 26) | (static_cast<std::uint64_t>(th) << 30);
+    if ((attr >> 8) & 1u)
+        for (int i = 0; i < needed; ++i) {
+            s.queue[i].u >>= level;
+            s.queue[i].v >>= level;
+        }
+    return true;
+}
+
 void kick(bool draw) {
     State &s = g_state;
     const std::uint32_t prim = static_cast<std::uint32_t>(s.prim) & 7u;
     const int needed = prim == 0 ? 1 : (prim == 1 || prim == 2 || prim == 6) ? 2 : prim == 7 ? 1 : 3;
     if (s.count < needed) return;
     if (draw) {
+        const std::uint64_t attr = (s.prmodecont & 1u) ? s.prim : s.prmode;
+        Context &x = s.ctx[(attr >> 9) & 1u];
+        const std::uint64_t tex0 = x.tex0, tex1 = x.tex1;
+        Vertex verts[3];
+        std::copy(s.queue, s.queue + 3, verts);
+        const bool mip = ((attr >> 4) & 1u) && select_mip(s, x, attr, needed);
+        if (mip) ++g_setup_generation;
         if (cpu_raster()) raster::draw(s, s.queue, needed);
 #ifdef PS2_GPU
         if (gpu_on()) gpu::draw(s, s.queue, needed);
 #endif
+        if (mip) {
+            x.tex0 = tex0;
+            x.tex1 = tex1;
+            std::copy(verts, verts + 3, s.queue);
+            ++g_setup_generation;
+        }
         ++g_primitives;
     }
     switch (prim) {
