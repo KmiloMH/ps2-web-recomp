@@ -1153,9 +1153,12 @@ bool texel_rect(const std::uint32_t *setup, const Vertex *v, int count, std::uin
         v0 = std::min(v0, t);
         v1 = std::max(v1, t);
     }
-    const auto axis = [](std::uint32_t mode, float lo, float hi, int size, std::uint32_t clamp, int &a, int &b) {
-        a = static_cast<int>(std::floor(lo)) - 1;
-        b = static_cast<int>(std::ceil(hi)) + 1;
+    // Bilinear filtering reaches one texel past the coordinates; point sampling reads texel
+    // floor(u) for u in [lo, hi], so it needs no margin.
+    const bool bilinear = setup[0] & 16384u;
+    const auto axis = [bilinear](std::uint32_t mode, float lo, float hi, int size, std::uint32_t clamp, int &a, int &b) {
+        a = static_cast<int>(std::floor(lo)) - (bilinear ? 1 : 0);
+        b = bilinear ? static_cast<int>(std::ceil(hi)) + 1 : static_cast<int>(std::floor(hi));
         switch (mode) {
         case 0:
             if (a < 0 || b >= size) {
@@ -1537,7 +1540,12 @@ void draw(const State &st, const Vertex *v, int count) {
         b.rx1 = -2;
     }
     b.zte = b.zte || zte;
-    b.zwrite = b.zwrite || (zte && !(flags & 32u));
+    // Depth is written only when ZMSK is clear, the depth test can pass and the alpha test does
+    // not always fail into a mode that keeps depth (AFAIL FB_ONLY or RGB_ONLY, or KEEP).
+    const std::uint32_t ztst = static_cast<std::uint32_t>(c.test >> 17) & 3u, atst = static_cast<std::uint32_t>(c.test >> 1) & 7u,
+                        afail = static_cast<std::uint32_t>(c.test >> 12) & 3u;
+    const bool alpha_blocks_z = (c.test & 1u) && atst == 0 && afail != 2;
+    b.zwrite = b.zwrite || (zte && !(flags & 32u) && ztst != 0 && !alpha_blocks_z);
     const std::size_t setups = b.setups.size() / kSetupWords;
     std::uint32_t setup_index;
     if (setups && std::memcmp(b.setups.data() + (setups - 1) * kSetupWords, setup, kSetupWords * 4) == 0) {
