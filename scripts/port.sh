@@ -20,6 +20,8 @@ options:
   --rounds N         exploring runs at most (default 8)
   --no-explore       translate and build without running the game
   --native-only      skip the browser build and the Emscripten SDK it needs
+  --seed-prologues   also seed likely function prologues the static pass misses
+                     (off by default; some games need it, e.g. The Simpsons)
   --pnach FILE       apply a PCSX2 patch file, repeatable; patches that land in
                      the executable are translated with it, the rest are
                      written into memory at boot or every frame
@@ -31,7 +33,7 @@ EOF
 
 [ $# -ge 2 ] || { usage; exit 2; }
 name="$1"; source_path="$2"; shift 2
-frames=3600; rounds=8; explore=1; web=1; presses=(); pnach=()
+frames=3600; rounds=8; explore=1; web=1; seed_prologues=0; presses=(); pnach=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --frames) frames="$2"; shift ;;
@@ -39,6 +41,7 @@ while [ $# -gt 0 ]; do
     --rounds) rounds="$2"; shift ;;
     --no-explore) explore=0 ;;
     --native-only) web=0 ;;
+    --seed-prologues) seed_prologues=1 ;;
     --pnach) pnach+=("$(realpath "$2")"); shift ;;
     --pnach-section) pnach=(--section "$2" "${pnach[@]}"); shift ;;
     -h|--help) usage; exit 0 ;;
@@ -119,9 +122,13 @@ if windows=$(python3 -I "$here/windows.py" list "$elf") && [ -n "$windows" ]; th
   echo "code windows the game rewrites: $(echo "$windows" | tr '\n' ' ')"
 fi
 
-# --seed-prologues replaces the old tools/prologues.py step: entries.txt now only carries what
-# exploration found.
-translate() { "$tools/eerecomp" "$elf" --entries "$game/entries.txt" --seed-prologues "${modules[@]}" "${overlays[@]}" --out "$generated" | tail -1; }
+# --seed-prologues is opt-in and replaces the old tools/prologues.py step, so entries.txt only
+# carries what exploration found. Off by default to keep other games' output unchanged.
+translate() {
+  local seed=()
+  if [ "$seed_prologues" = 1 ]; then seed=(--seed-prologues); fi
+  "$tools/eerecomp" "$elf" --entries "$game/entries.txt" "${seed[@]}" "${modules[@]}" "${overlays[@]}" --out "$generated" | tail -1
+}
 
 echo "== [3/6] machine code to C++"
 touch "$game/entries.txt"
