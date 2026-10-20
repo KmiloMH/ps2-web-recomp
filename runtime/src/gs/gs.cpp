@@ -815,10 +815,14 @@ void vblank(bool start) {
     if (start) {
         g_odd_field = !g_odd_field;
         raise(8);
-        if (queue::active()) queue::post(queue::kVblank, 0, 0, nullptr, 0);
+        if (queue::active()) {
+            queue::post(queue::kVblank, 0, 0, nullptr, 0);
+        } else {
+            gif::render_path3_vblank();
 #ifdef PS2_GPU
-        else if (gpu_on()) gpu::flush();
+            if (gpu_on()) gpu::flush();
 #endif
+        }
     }
 }
 
@@ -989,6 +993,7 @@ Rendered render_pending(const std::function<void(const DisplayRegs &)> &on_prese
         case queue::kReset: render_reset(); break;
         case queue::kVertexReset: g_state.count = 0; break;
         case queue::kVblank:
+            gif::render_path3_vblank();
 #ifdef PS2_GPU
             if (gpu_on()) gpu::flush();
 #endif

@@ -23,5 +23,6 @@ void write(std::uint32_t a, std::uint32_t v);
 void set_path3_masked(bool masked);
 void order_path3_mask(bool masked);
 void render_path3_mask(bool masked);
+void render_path3_vblank();
 
 }

@@ -167,7 +167,7 @@ void render_reset() {
 }
 
 void render(int path, const std::uint8_t *data, std::uint32_t qwc) {
-    if (path == 3 && g_path3_hold) {
+    if (path == 3 && (g_path3_hold || !g_path3_held.empty())) {
         g_path3_held.insert(g_path3_held.end(), data, data + static_cast<std::size_t>(qwc) * 16);
         return;
     }
@@ -175,16 +175,42 @@ void render(int path, const std::uint8_t *data, std::uint32_t qwc) {
     walk(g_paths[path], data, qwc, sink);
 }
 
-// A real GIF stalls channel 2 while MSKPATH3 is set and lets it through on unmask, so
-// textures a game streams over PATH3 land between the PATH1 draws it fences them with.
-// Transfers here complete at once; hold their data until the mask drops instead.
+// Bytes from the start of held PATH3 data through the end of its first GIF packet (the
+// first tag with EOP), or all of it when no complete packet is held.
+std::size_t first_packet_bytes(const std::vector<std::uint8_t> &held) {
+    std::size_t at = 0;
+    while (at + 16 <= held.size()) {
+        std::uint64_t tag;
+        std::memcpy(&tag, held.data() + at, 8);
+        const std::uint64_t nloop = tag & 0x7FFFu, flg = (tag >> 58) & 3u;
+        const std::uint64_t nreg = ((tag >> 60) & 15u) ? ((tag >> 60) & 15u) : 16u;
+        const std::uint64_t qwords = flg == 0 ? nloop * nreg : flg == 1 ? (nloop * nreg + 1) / 2 : nloop;
+        at += 16 + static_cast<std::size_t>(qwords) * 16;
+        if ((tag >> 15) & 1u) return std::min(at, held.size());
+    }
+    return held.size();
+}
+
+void release_path3(std::size_t bytes) {
+    if (!bytes) return;
+    std::vector<std::uint8_t> out(g_path3_held.begin(), g_path3_held.begin() + static_cast<std::ptrdiff_t>(bytes));
+    g_path3_held.erase(g_path3_held.begin(), g_path3_held.begin() + static_cast<std::ptrdiff_t>(bytes));
+    GsSink sink{3};
+    walk(g_paths[3], out.data(), static_cast<std::uint32_t>(out.size() / 16), sink);
+}
+
+// A real GIF stalls channel 2 while MSKPATH3 is set. Lifting the mask lets PATH3 run, and
+// setting it again stops it at the end of the GIF packet in flight, so a game that toggles
+// the mask around each object's draws streams one texture packet per window. Transfers here
+// complete at once; hold their data and release one packet per unmask instead.
 void render_path3_mask(bool masked) {
     g_path3_hold = masked;
-    if (masked || g_path3_held.empty()) return;
-    std::vector<std::uint8_t> held;
-    held.swap(g_path3_held);
-    GsSink sink{3};
-    walk(g_paths[3], held.data(), static_cast<std::uint32_t>(held.size() / 16), sink);
+    if (!masked) release_path3(first_packet_bytes(g_path3_held));
+}
+
+// Whatever is still held when a frame ends with PATH3 open would have gone through by then.
+void render_path3_vblank() {
+    if (!g_path3_hold) release_path3(g_path3_held.size());
 }
 
 // Called from the side that executes the VIF1 stream in order with the GIF paths.
