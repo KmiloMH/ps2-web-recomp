@@ -292,13 +292,16 @@ void load_card() {
     if (g_card.present || g_options.memcard_path.empty()) return;
     g_card.data.assign(kCardBytes, 0xFF);
     std::ifstream in(g_options.memcard_path, std::ios::binary);
+    bool fresh = !in;
     if (in) {
         in.read(reinterpret_cast<char *>(g_card.data.data()), static_cast<std::streamsize>(kCardBytes));
-    } else {
-        format_card();
+        // Images made before new cards were created formatted are erased throughout; treat them as
+        // new so a browser that kept one does not stay on a card the game cannot use.
+        fresh = std::all_of(g_card.data.begin(), g_card.data.end(), [](std::uint8_t b) { return b == 0xFF; });
     }
+    if (fresh) format_card();
     g_card.present = true;
-    std::fprintf(stderr, "[mc] card in slot 1: %s%s\n", g_options.memcard_path.c_str(), in ? "" : " (new, formatted)");
+    std::fprintf(stderr, "[mc] card in slot 1: %s%s\n", g_options.memcard_path.c_str(), fresh ? " (new, formatted)" : "");
 }
 
 void memory_card(std::size_t at, std::uint32_t out_size) {
