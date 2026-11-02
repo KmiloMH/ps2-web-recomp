@@ -216,11 +216,28 @@ const remoteLog = (() => {
   window.addEventListener('unhandledrejection', (e) => push('[rejection] ' + e.reason));
   document.addEventListener('visibilitychange', () => push('[page] ' + document.visibilityState));
   window.addEventListener('pagehide', () => { push('[page] closed'); flush(); });
+  const hex = (v) => (v >>> 0).toString(16).padStart(8, '0');
+  // A pc that moves means a loop in game code; one that stays with the budget frozen, in the runtime.
+  const probeStall = () => {
+    for (let i = 0; i < 6; ++i) setTimeout(() => {
+      const p = [0, 1, 2, 3, 4, 5].map((k) => Module._ps2web_ee_probe(k));
+      push('[probe] pc ' + hex(p[0]) + ' ra ' + hex(p[1]) + ' sp ' + hex(p[2]) + ' budget ' + p[3] + ' a0 ' + hex(p[4]) + ' v0 ' + hex(p[5]));
+    }, i * 300);
+    const sp = Module._ps2web_ee_probe(2), words = [];
+    for (let i = 0; i < 256; ++i) words.push(hex(Module._ps2web_ee_word(sp + i * 4)));
+    push('[stack] ' + words.join(' '));
+  };
+  let stalls = 0;
   let lastFrame = -1;
   setInterval(() => {
     const frame = Module._ps2web_frames && Module.running ? Module._ps2web_frames() : -1;
     if (frame >= 0) {
-      if (frame === lastFrame) push('[stall] no frames for 5 s at frame ' + frame);
+      if (frame === lastFrame) {
+        push('[stall] no frames for 5 s at frame ' + frame);
+        if (stalls++ === 0) probeStall();
+      } else {
+        stalls = 0;
+      }
       push('[stats] ' + statsEl.textContent);
       lastFrame = frame;
     }

@@ -1,5 +1,6 @@
 #include "ps2/disc.hpp"
 #include "ps2/system.hpp"
+#include "ps2/memory.hpp"
 
 #include <emscripten.h>
 #include <emscripten/threading.h>
@@ -348,6 +349,23 @@ extern "C" EMSCRIPTEN_KEEPALIVE void *ps2web_audio_ring() { return &g_audio; }
 extern "C" EMSCRIPTEN_KEEPALIVE double ps2web_audio_queued_ms() { return audio_queued_ms(); }
 extern "C" EMSCRIPTEN_KEEPALIVE void ps2web_request_state() { ps2::request_state_save("/export.state"); }
 extern "C" EMSCRIPTEN_KEEPALIVE double ps2web_vu_interpreted() { return static_cast<double>(ps2::vu1_interpreted_calls()); }
+// Read from the page's thread while the game runs, so values can be torn; good enough to tell
+// where a stuck game is. 0 pc, 1 ra, 2 sp, 3 budget, 4 a0, 5 v0.
+extern "C" EMSCRIPTEN_KEEPALIVE double ps2web_ee_probe(int which) {
+    const ps2::Cpu &c = ps2::g_cpu;
+    switch (which) {
+    case 0: return c.pc;
+    case 1: return static_cast<std::uint32_t>(c.r[31].sd[0]);
+    case 2: return static_cast<std::uint32_t>(c.r[29].sd[0]);
+    case 3: return c.budget;
+    case 4: return static_cast<std::uint32_t>(c.r[4].sd[0]);
+    default: return static_cast<std::uint32_t>(c.r[2].sd[0]);
+    }
+}
+extern "C" EMSCRIPTEN_KEEPALIVE double ps2web_ee_word(double address) {
+    return ps2::ld32(static_cast<std::uint32_t>(address));
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE double ps2web_idle_ms(int which) {
     if (which == 2) return ps2::vu_thread_idle_ms();
     return which ? g_render_idle.load() : g_emulation_idle.load();
