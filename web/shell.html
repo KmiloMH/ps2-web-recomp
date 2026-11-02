@@ -191,6 +191,44 @@ const statsEl = document.getElementById('stats');
 const canvas = document.getElementById('canvas');
 const params = new URLSearchParams(location.search);
 
+// ?log sends the page's console, errors and a heartbeat to the server (serve.py --log), so a play
+// session leaves a record without DevTools open. The heartbeat also marks when the game stops.
+const remoteLog = (() => {
+  if (!params.has('log')) return () => {};
+  let queue = [];
+  const push = (line) => {
+    if (queue.length < 5000) queue.push(new Date().toISOString().slice(11, 23) + ' ' + line);
+  };
+  const flush = () => {
+    if (!queue.length) return;
+    const body = queue.join('\n');
+    queue = [];
+    fetch('/log', { method: 'POST', body, keepalive: body.length < 60000 }).catch(() => {});
+  };
+  for (const level of ['log', 'warn', 'error']) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => {
+      original(...args);
+      push('[' + level + '] ' + args.map(String).join(' '));
+    };
+  }
+  window.addEventListener('error', (e) => push('[page error] ' + e.message + ' at ' + e.filename + ':' + e.lineno));
+  window.addEventListener('unhandledrejection', (e) => push('[rejection] ' + e.reason));
+  document.addEventListener('visibilitychange', () => push('[page] ' + document.visibilityState));
+  window.addEventListener('pagehide', () => { push('[page] closed'); flush(); });
+  let lastFrame = -1;
+  setInterval(() => {
+    const frame = Module._ps2web_frames && Module.running ? Module._ps2web_frames() : -1;
+    if (frame >= 0) {
+      if (frame === lastFrame) push('[stall] no frames for 5 s at frame ' + frame);
+      push('[stats] ' + statsEl.textContent);
+      lastFrame = frame;
+    }
+  }, 5000);
+  setInterval(flush, 2000);
+  return push;
+})();
+
 function missingFeatures() {
   const header = [0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 10];
   const accepts = (body) => {
@@ -376,6 +414,7 @@ window.addEventListener('keydown', (e) => {
       link.click();
       setTimeout(() => URL.revokeObjectURL(link.href), 10000);
       note('State saved: ' + link.download);
+      remoteLog('[state] ' + link.download);
       return;
     }
     last = size;
@@ -606,6 +645,7 @@ var Module = {
   noCard: params.has('nocard'),
   presentCopy: params.has('copy'),
   onHalt: (reason) => {
+    remoteLog('[halt] ' + reason);
     clearTimeout(noteTimer);
     noteTimer = 0;
     statusEl.textContent = 'Halted: ' + reason;

@@ -2,6 +2,7 @@
 """Serves a web build and a disc image with HTTP range requests.
 
 usage: serve.py <build dir> <disc image> [port] [--host address] [--record <dir for unrecorded VU1 programs>]
+                [--log <file for what a page opened with ?log reports>]
 """
 
 import http.server
@@ -14,6 +15,11 @@ RECORD = None
 if '--record' in sys.argv:
     at = sys.argv.index('--record')
     RECORD = os.path.abspath(sys.argv[at + 1])
+    del sys.argv[at:at + 2]
+LOG = None
+if '--log' in sys.argv:
+    at = sys.argv.index('--log')
+    LOG = os.path.abspath(sys.argv[at + 1])
     del sys.argv[at:at + 2]
 HOST = '127.0.0.1'
 if '--host' in sys.argv:
@@ -96,6 +102,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
                 left -= len(chunk)
 
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', '0'))
+        if not LOG or self.path != '/log' or length > 1 << 22:
+            self.send_error(400)
+            return
+        data = self.rfile.read(length)
+        with open(LOG, 'ab') as f:
+            f.write(data + b'\n')
+        self.send_response(204)
+        self.end_headers()
+
     def do_PUT(self):
         match = re.match(r'^/vu1/([0-9A-F]{16}_[0-9A-F]{4}\.bin)$', self.path.split('?', 1)[0])
         length = int(self.headers.get('Content-Length', '0'))
@@ -117,5 +134,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+if LOG:
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
 print('serving %s and %s on http://%s:%d/' % (BUILD, DISC, HOST, PORT))
 http.server.ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
